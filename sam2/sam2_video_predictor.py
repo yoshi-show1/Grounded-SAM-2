@@ -676,7 +676,9 @@ class SAM2VideoPredictor(SAM2Base):
         num_frames = inference_state["num_frames"]
         batch_size = self._get_obj_num(inference_state)
         if len(output_dict["cond_frame_outputs"]) == 0:
-            raise RuntimeError("No points are provided; please add points first")
+            # raise RuntimeError("No points are provided; please add points first")
+            print("No points are provided; skipping this frame.")
+            return
         clear_non_cond_mem = self.clear_non_cond_mem_around_input and (
             self.clear_non_cond_mem_for_multi_obj or batch_size <= 1
         )

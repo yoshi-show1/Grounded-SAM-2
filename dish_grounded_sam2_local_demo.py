@@ -1,11 +1,3 @@
-# dds cloudapi for Grounding DINO 1.5
-from dds_cloudapi_sdk import Config
-from dds_cloudapi_sdk import Client
-from dds_cloudapi_sdk import DetectionTask
-from dds_cloudapi_sdk import TextPrompt
-from dds_cloudapi_sdk import DetectionModel
-from dds_cloudapi_sdk import DetectionTarget
-
 import os
 import cv2
 import json
@@ -14,91 +6,48 @@ import numpy as np
 import supervision as sv
 import pycocotools.mask as mask_util
 from pathlib import Path
-from PIL import Image
+from torchvision.ops import box_convert
 from sam2.build_sam import build_sam2
 from sam2.sam2_image_predictor import SAM2ImagePredictor
+from grounding_dino.groundingdino.util.inference import load_model, load_image, predict
 
-import requests
 
-# os.environ['http_proxy'] = 'http://200406856:taka4442@10.1.8.72:8080'
-# os.environ['https_proxy'] = 'http://200406856:taka4442@10.1.8.72:8080'
+# # チェックポイントファイルをロード
+# checkpoint = torch.load("gdino_checkpoints/groundingdino_swint_ogc0.pth")["model"]
+checkpoint = torch.load("gdino_checkpoints/original_groundingdino_swint_ogc.pth")
+# checkpoint = torch.load("gdino_checkpoints/best_coco_bbox_mAP_epoch_14.pth")["state_dict"]
+# new_checkpoint = {}
+# for n, p in checkpoint.items():
+#     key = 'module.' + n
+#     new_checkpoint[key] = p
+# checkpoint = new_checkpoint
+# checkpoint.keys()
 
-# proxies = {
-#     "http": "http://200406856:taka4442@10.1.8.72:8080",
-#     "https": "hhttp://200406856:taka4442@10.1.8.72:8080",
-# }
+# # チェックポイントの内容を確認
+# print(checkpoint.keys())
 
-# response = requests.get("http://www.example.com", proxies=proxies)
-# print(response.status_code)
 
 """
 Hyper parameters
 """
-API_TOKEN = "Your API token"
-TEXT_PROMPT = "car . building ."
-IMG_PATH = "notebooks/images/cars.jpg"
+TEXT_PROMPT = "dish. food. tray."
+IMG_PATH = "notebooks/images/mkr69552-scaled.jpg"
 SAM2_CHECKPOINT = "./checkpoints/sam2.1_hiera_large.pt"
 SAM2_MODEL_CONFIG = "configs/sam2.1/sam2.1_hiera_l.yaml"
-GROUNDING_MODEL = DetectionModel.GDino1_5_Pro # DetectionModel.GDino1_6_Pro
+GROUNDING_DINO_CONFIG = "grounding_dino/groundingdino/config/GroundingDINO_SwinT_OGC.py"
+# GROUNDING_DINO_CHECKPOINT = "gdino_checkpoints/groundingdino_swint_ogc0.pth"
+GROUNDING_DINO_CHECKPOINT = "gdino_checkpoints/original_groundingdino_swint_ogc.pth"
+BOX_THRESHOLD = 0.35
+TEXT_THRESHOLD = 0.25
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-OUTPUT_DIR = Path("outputs/grounded_sam2_gd1.5_demo")
+OUTPUT_DIR = Path("outputs/dish_grounded_sam2_local_demo")
 DUMP_JSON_RESULTS = True
 
 # create output directory
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
-"""
-Prompt Grounding DINO 1.5 with Text for Box Prompt Generation with Cloud API
-"""
-# Step 1: initialize the config
-token = API_TOKEN
-config = Config(token)
-
-# Step 2: initialize the client
-client = Client(config)
-
-# Step 3: run the task by DetectionTask class
-# image_url = "https://algosplt.oss-cn-shenzhen.aliyuncs.com/test_files/tasks/detection/iron_man.jpg"
-# if you are processing local image file, upload them to DDS server to get the image url
-img_path = IMG_PATH
-image_url = client.upload_file(img_path)
-
-task = DetectionTask(
-    image_url=image_url,
-    prompts=[TextPrompt(text=TEXT_PROMPT)],
-    targets=[DetectionTarget.BBox],  # detect bbox
-    model=GROUNDING_MODEL,  # detect with GroundingDino-1.5-Pro model
-)
-
-client.run_task(task)
-result = task.result
-
-objects = result.objects  # the list of detected objects
-
-
-input_boxes = []
-confidences = []
-class_names = []
-
-for idx, obj in enumerate(objects):
-    input_boxes.append(obj.bbox)
-    confidences.append(obj.score)
-    class_names.append(obj.category)
-
-input_boxes = np.array(input_boxes)
-
-"""
-Init SAM 2 Model and Predict Mask with Box Prompt
-"""
-
 # environment settings
 # use bfloat16
-torch.autocast(device_type=DEVICE, dtype=torch.bfloat16).__enter__()
-
-if torch.cuda.get_device_properties(0).major >= 8:
-    # turn on tfloat32 for Ampere GPUs (https://pytorch.org/docs/stable/notes/cuda.html#tensorfloat-32-tf32-on-ampere-devices)
-    torch.backends.cuda.matmul.allow_tf32 = True
-    torch.backends.cudnn.allow_tf32 = True
 
 # build SAM2 image predictor
 sam2_checkpoint = SAM2_CHECKPOINT
@@ -106,9 +55,44 @@ model_cfg = SAM2_MODEL_CONFIG
 sam2_model = build_sam2(model_cfg, sam2_checkpoint, device=DEVICE)
 sam2_predictor = SAM2ImagePredictor(sam2_model)
 
-image = Image.open(img_path)
+# build grounding dino model
+grounding_model = load_model(
+    model_config_path=GROUNDING_DINO_CONFIG, 
+    model_checkpoint_path=GROUNDING_DINO_CHECKPOINT,
+    device=DEVICE
+)
 
-sam2_predictor.set_image(np.array(image.convert("RGB")))
+
+# setup the input image and text prompt for SAM 2 and Grounding DINO
+# VERY important: text queries need to be lowercased + end with a dot
+text = TEXT_PROMPT
+img_path = IMG_PATH
+
+image_source, image = load_image(img_path)
+
+sam2_predictor.set_image(image_source)
+
+boxes, confidences, labels = predict(
+    model=grounding_model,
+    image=image,
+    caption=text,
+    box_threshold=BOX_THRESHOLD,
+    text_threshold=TEXT_THRESHOLD,
+)
+
+# process the box prompt for SAM 2
+h, w, _ = image_source.shape
+boxes = boxes * torch.Tensor([w, h, w, h])
+input_boxes = box_convert(boxes=boxes, in_fmt="cxcywh", out_fmt="xyxy").numpy()
+print("input_boxes",input_boxes)
+
+# FIXME: figure how does this influence the G-DINO model
+torch.autocast(device_type="cuda", dtype=torch.bfloat16).__enter__()
+
+if torch.cuda.get_device_properties(0).major >= 8:
+    # turn on tfloat32 for Ampere GPUs (https://pytorch.org/docs/stable/notes/cuda.html#tensorfloat-32-tf32-on-ampere-devices)
+    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cudnn.allow_tf32 = True
 
 masks, scores, logits = sam2_predictor.predict(
     point_coords=None,
@@ -116,7 +100,6 @@ masks, scores, logits = sam2_predictor.predict(
     box=input_boxes,
     multimask_output=False,
 )
-
 
 """
 Post-process the output of the model to get the masks, scores, and logits for visualization
@@ -126,9 +109,8 @@ if masks.ndim == 4:
     masks = masks.squeeze(1)
 
 
-"""
-Visualization the Predict Results
-"""
+confidences = confidences.numpy().tolist()
+class_names = labels
 
 class_ids = np.array(list(range(len(class_names))))
 
@@ -174,8 +156,6 @@ if DUMP_JSON_RESULTS:
 
     input_boxes = input_boxes.tolist()
     scores = scores.tolist()
-    # FIXME: class_names should be a list of strings without spaces
-    class_names = [class_name.strip() for class_name in class_names]
     # save the results in standard format
     results = {
         "image_path": img_path,
@@ -189,9 +169,9 @@ if DUMP_JSON_RESULTS:
             for class_name, box, mask_rle, score in zip(class_names, input_boxes, mask_rles, scores)
         ],
         "box_format": "xyxy",
-        "img_width": image.width,
-        "img_height": image.height,
+        "img_width": w,
+        "img_height": h,
     }
     
-    with open(os.path.join(OUTPUT_DIR, "grounded_sam2_gd1.5_image_demo_results.json"), "w") as f:
+    with open(os.path.join(OUTPUT_DIR, "grounded_sam2_local_image_demo_results.json"), "w") as f:
         json.dump(results, f, indent=4)

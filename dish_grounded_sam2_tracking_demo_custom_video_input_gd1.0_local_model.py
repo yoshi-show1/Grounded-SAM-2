@@ -17,14 +17,14 @@ from utils.video_utils import create_video_from_images
 Hyperparam for Ground and Tracking
 """
 GROUNDING_DINO_CONFIG = "grounding_dino/groundingdino/config/GroundingDINO_SwinT_OGC.py"
-# GROUNDING_DINO_CHECKPOINT = "gdino_checkpoints/groundingdino_swint_ogc.pth"
-GROUNDING_DINO_CHECKPOINT = "gdino_checkpoints/original_groundingdino_swint_ogc.pth"
+GROUNDING_DINO_CHECKPOINT = "gdino_checkpoints/groundingdino_swint_ogc.pth"
+# GROUNDING_DINO_CHECKPOINT = "gdino_checkpoints/original_groundingdino_swint_ogc.pth"
 BOX_THRESHOLD = 0.35
 TEXT_THRESHOLD = 0.25
-VIDEO_PATH = "./assets/dish.mp4"
+VIDEO_PATH = "./assets/clip.mp4"
 # VIDEO_PATH = "./assets/color_20240826_132239_0217.jpg"
 TEXT_PROMPT = "dish. food. tray."
-OUTPUT_VIDEO_PATH = "./dish_tracking_demo.mp4"
+OUTPUT_VIDEO_PATH = "./dish_tracking_clip_before.mp4"
 # OUTPUT_VIDEO_PATH = "./test.jpg"
 SOURCE_VIDEO_FRAME_DIR = "./custom_video_frames"
 SAVE_TRACKING_RESULTS_DIR = "./tracking_results"
@@ -103,7 +103,7 @@ boxes = boxes * torch.Tensor([w, h, w, h])
 input_boxes = box_convert(boxes=boxes, in_fmt="cxcywh", out_fmt="xyxy").numpy()
 confidences = confidences.numpy().tolist()
 class_names = labels
-
+print("input_boxes")
 print(input_boxes)
 
 # prompt SAM image predictor to get the mask for the object

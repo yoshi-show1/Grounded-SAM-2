@@ -27,11 +27,15 @@ build-image:
 	@echo $(BUILD_MESSAGE)
 	docker build --build-arg USE_CUDA=$(USE_CUDA) \
 	--build-arg TORCH_ARCH=$(TORCH_CUDA_ARCH_LIST) \
+	--build-arg HTTP_PROXY="http://200406856:taka4442@10.1.8.72:8080" \
+	--build-arg HTTPS_PROXY="http://200406856:taka4442@10.1.8.72:8080" \
 	-t grounded_sam2:1.0 .
 run:
 	docker run --gpus all -it --rm --net=host --privileged \
 	-v /tmp/.X11-unix:/tmp/.X11-unix \
 	-v "${PWD}":/home/appuser/Grounded-SAM-2 \
 	-e DISPLAY=$DISPLAY \
+	-e http_proxy=http://200406856:taka4442@10.1.8.72:8080 \
+	-e https_proxy=http://200406856:taka4442@10.1.8.72:8080 \
 	--name=gsa \
 	--ipc=host -it grounded_sam2:1.0
