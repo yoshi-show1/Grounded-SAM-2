@@ -145,3 +145,21 @@ dmypy.json
 outputs/
 
 .idea/
+
+outputs_*/
+outputs*/
+
+outputs2/
+outputs3/
+
+gdino_checkpoints/*
+
+*.mp4
+
+tracking_results/*
+
+custom_video_frames/*
+
+demo_images/*
+
+notebooks/*

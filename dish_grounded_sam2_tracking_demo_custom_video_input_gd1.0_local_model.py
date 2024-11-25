@@ -1,33 +1,46 @@
-# dds cloudapi for Grounding DINO 1.5
-from dds_cloudapi_sdk import Config
-from dds_cloudapi_sdk import Client
-from dds_cloudapi_sdk import DetectionTask
-from dds_cloudapi_sdk import TextPrompt
-from dds_cloudapi_sdk import DetectionModel
-from dds_cloudapi_sdk import DetectionTarget
-
 import os
 import cv2
 import torch
 import numpy as np
 import supervision as sv
+from torchvision.ops import box_convert
+from pathlib import Path
+from tqdm import tqdm
 from PIL import Image
 from sam2.build_sam import build_sam2_video_predictor, build_sam2
 from sam2.sam2_image_predictor import SAM2ImagePredictor 
+from grounding_dino.groundingdino.util.inference import load_model, load_image, predict
 from utils.track_utils import sample_points_from_masks
 from utils.video_utils import create_video_from_images
 
+"""
+Hyperparam for Ground and Tracking
+"""
+GROUNDING_DINO_CONFIG = "grounding_dino/groundingdino/config/GroundingDINO_SwinT_OGC.py"
+GROUNDING_DINO_CHECKPOINT = "gdino_checkpoints/groundingdino_swint_ogc.pth"
+# GROUNDING_DINO_CHECKPOINT = "gdino_checkpoints/original_groundingdino_swint_ogc.pth"
+BOX_THRESHOLD = 0.35
+TEXT_THRESHOLD = 0.25
+VIDEO_PATH = "./assets/clip.mp4"
+# VIDEO_PATH = "./assets/color_20240826_132239_0217.jpg"
+TEXT_PROMPT = "dish. food. tray."
+OUTPUT_VIDEO_PATH = "./dish_tracking_clip_before.mp4"
+# OUTPUT_VIDEO_PATH = "./test.jpg"
+SOURCE_VIDEO_FRAME_DIR = "./custom_video_frames"
+SAVE_TRACKING_RESULTS_DIR = "./tracking_results"
+PROMPT_TYPE_FOR_VIDEO = "box" # choose from ["point", "box", "mask"]
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 """
-Step 1: Environment settings and model initialization for SAM 2
+Step 1: Environment settings and model initialization for Grounding DINO and SAM 2
 """
-# use bfloat16 for the entire notebook
-torch.autocast(device_type="cuda", dtype=torch.bfloat16).__enter__()
+# build grounding dino model from local path
+grounding_model = load_model(
+    model_config_path=GROUNDING_DINO_CONFIG, 
+    model_checkpoint_path=GROUNDING_DINO_CHECKPOINT,
+    device=DEVICE
+)
 
-if torch.cuda.get_device_properties(0).major >= 8:
-    # turn on tfloat32 for Ampere GPUs (https://pytorch.org/docs/stable/notes/cuda.html#tensorfloat-32-tf32-on-ampere-devices)
-    torch.backends.cuda.matmul.allow_tf32 = True
-    torch.backends.cudnn.allow_tf32 = True
 
 # init sam image predictor and video predictor model
 sam2_checkpoint = "./checkpoints/sam2.1_hiera_large.pt"
@@ -38,76 +51,76 @@ sam2_image_model = build_sam2(model_cfg, sam2_checkpoint)
 image_predictor = SAM2ImagePredictor(sam2_image_model)
 
 
-# `video_dir` a directory of JPEG frames with filenames like `<frame_index>.jpg`
-video_dir = "notebooks/videos/bedroom"
+"""
+Custom video input directly using video files
+"""
+video_info = sv.VideoInfo.from_video_path(VIDEO_PATH)  # get video info
+print(video_info)
+frame_generator = sv.get_video_frames_generator(VIDEO_PATH, stride=1, start=0, end=None)
+
+# saving video to frames
+source_frames = Path(SOURCE_VIDEO_FRAME_DIR)
+source_frames.mkdir(parents=True, exist_ok=True)
+
+with sv.ImageSink(
+    target_dir_path=source_frames, 
+    overwrite=True, 
+    image_name_pattern="{:05d}.jpg"
+) as sink:
+    for frame in tqdm(frame_generator, desc="Saving Video Frames"):
+        sink.save_image(frame)
 
 # scan all the JPEG frame names in this directory
 frame_names = [
-    p for p in os.listdir(video_dir)
-    if os.path.splitext(p)[-1] in [".jpg", ".jpeg", ".JPG", ".JPEG", ".png", ".PNG"]
+    p for p in os.listdir(SOURCE_VIDEO_FRAME_DIR)
+    if os.path.splitext(p)[-1] in [".jpg", ".jpeg", ".JPG", ".JPEG"]
 ]
 frame_names.sort(key=lambda p: int(os.path.splitext(p)[0]))
 
 # init video predictor state
-inference_state = video_predictor.init_state(video_path=video_dir)
+inference_state = video_predictor.init_state(video_path=SOURCE_VIDEO_FRAME_DIR)
 
 ann_frame_idx = 0  # the frame index we interact with
-ann_obj_id = 1  # give a unique id to each object we interact with (it can be any integers)
-
-
 """
 Step 2: Prompt Grounding DINO 1.5 with Cloud API for box coordinates
 """
 
 # prompt grounding dino to get the box coordinates on specific frame
-img_path = os.path.join(video_dir, frame_names[ann_frame_idx])
-image = Image.open(img_path)
+img_path = os.path.join(SOURCE_VIDEO_FRAME_DIR, frame_names[ann_frame_idx])
+image_source, image = load_image(img_path)
 
-# Step 1: initialize the config
-token = "Your API token"
-config = Config(token)
-
-# Step 2: initialize the client
-client = Client(config)
-
-# Step 3: run the task by DetectionTask class
-# image_url = "https://algosplt.oss-cn-shenzhen.aliyuncs.com/test_files/tasks/detection/iron_man.jpg"
-# if you are processing local image file, upload them to DDS server to get the image url
-image_url = client.upload_file(img_path)
-
-task = DetectionTask(
-    image_url=image_url,
-    prompts=[TextPrompt(text="children. pillow")],
-    targets=[DetectionTarget.BBox],  # detect bbox
-    model=DetectionModel.GDino1_5_Pro,  # detect with GroundingDino-1.5-Pro model
+boxes, confidences, labels = predict(
+    model=grounding_model,
+    image=image,
+    caption=TEXT_PROMPT,
+    box_threshold=BOX_THRESHOLD,
+    text_threshold=TEXT_THRESHOLD,
 )
 
-client.run_task(task)
-result = task.result
-
-objects = result.objects  # the list of detected objects
-
-
-input_boxes = []
-confidences = []
-class_names = []
-
-for idx, obj in enumerate(objects):
-    input_boxes.append(obj.bbox)
-    confidences.append(obj.score)
-    class_names.append(obj.category)
-
-input_boxes = np.array(input_boxes)
-
+# process the box prompt for SAM 2
+h, w, _ = image_source.shape
+boxes = boxes * torch.Tensor([w, h, w, h])
+input_boxes = box_convert(boxes=boxes, in_fmt="cxcywh", out_fmt="xyxy").numpy()
+confidences = confidences.numpy().tolist()
+class_names = labels
+print("input_boxes")
 print(input_boxes)
 
 # prompt SAM image predictor to get the mask for the object
-image_predictor.set_image(np.array(image.convert("RGB")))
+image_predictor.set_image(image_source)
 
 # process the detection results
 OBJECTS = class_names
 
 print(OBJECTS)
+
+# FIXME: figure how does this influence the G-DINO model
+torch.autocast(device_type=DEVICE, dtype=torch.bfloat16).__enter__()
+
+if torch.cuda.get_device_properties(0).major >= 8:
+    # turn on tfloat32 for Ampere GPUs (https://pytorch.org/docs/stable/notes/cuda.html#tensorfloat-32-tf32-on-ampere-devices)
+    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cudnn.allow_tf32 = True
 
 # prompt SAM 2 image predictor to get the mask for the object
 masks, scores, logits = image_predictor.predict(
@@ -116,20 +129,13 @@ masks, scores, logits = image_predictor.predict(
     box=input_boxes,
     multimask_output=False,
 )
-
 # convert the mask shape to (n, H, W)
-if masks.ndim == 3:
-    masks = masks[None]
-    scores = scores[None]
-    logits = logits[None]
-elif masks.ndim == 4:
+if masks.ndim == 4:
     masks = masks.squeeze(1)
 
 """
 Step 3: Register each object's positive points to video predictor with seperate add_new_points call
 """
-
-PROMPT_TYPE_FOR_VIDEO = "box" # or "point"
 
 assert PROMPT_TYPE_FOR_VIDEO in ["point", "box", "mask"], "SAM 2 video predictor only support point/box/mask prompt"
 
@@ -170,7 +176,6 @@ else:
     raise NotImplementedError("SAM 2 video predictor only support point/box/mask prompts")
 
 
-
 """
 Step 4: Propagate the video predictor to get the segmentation results for each frame
 """
@@ -185,14 +190,13 @@ for out_frame_idx, out_obj_ids, out_mask_logits in video_predictor.propagate_in_
 Step 5: Visualize the segment results across the video and save them
 """
 
-save_dir = "./tracking_results"
-
-if not os.path.exists(save_dir):
-    os.makedirs(save_dir)
+if not os.path.exists(SAVE_TRACKING_RESULTS_DIR):
+    os.makedirs(SAVE_TRACKING_RESULTS_DIR)
 
 ID_TO_OBJECTS = {i: obj for i, obj in enumerate(OBJECTS, start=1)}
+
 for frame_idx, segments in video_segments.items():
-    img = cv2.imread(os.path.join(video_dir, frame_names[frame_idx]))
+    img = cv2.imread(os.path.join(SOURCE_VIDEO_FRAME_DIR, frame_names[frame_idx]))
     
     object_ids = list(segments.keys())
     masks = list(segments.values())
@@ -209,12 +213,11 @@ for frame_idx, segments in video_segments.items():
     annotated_frame = label_annotator.annotate(annotated_frame, detections=detections, labels=[ID_TO_OBJECTS[i] for i in object_ids])
     mask_annotator = sv.MaskAnnotator()
     annotated_frame = mask_annotator.annotate(scene=annotated_frame, detections=detections)
-    cv2.imwrite(os.path.join(save_dir, f"annotated_frame_{frame_idx:05d}.jpg"), annotated_frame)
+    cv2.imwrite(os.path.join(SAVE_TRACKING_RESULTS_DIR, f"annotated_frame_{frame_idx:05d}.jpg"), annotated_frame)
 
 
 """
 Step 6: Convert the annotated frames to video
 """
 
-output_video_path = "./children_tracking_demo_video.mp4"
-create_video_from_images(save_dir, output_video_path)
+create_video_from_images(SAVE_TRACKING_RESULTS_DIR, OUTPUT_VIDEO_PATH)

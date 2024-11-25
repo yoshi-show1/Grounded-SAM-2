@@ -17,12 +17,15 @@ from utils.video_utils import create_video_from_images
 Hyperparam for Ground and Tracking
 """
 GROUNDING_DINO_CONFIG = "grounding_dino/groundingdino/config/GroundingDINO_SwinT_OGC.py"
-GROUNDING_DINO_CHECKPOINT = "gdino_checkpoints/groundingdino_swint_ogc.pth"
+# GROUNDING_DINO_CHECKPOINT = "gdino_checkpoints/groundingdino_swint_ogc.pth"
+GROUNDING_DINO_CHECKPOINT = "gdino_checkpoints/original_groundingdino_swint_ogc.pth"
 BOX_THRESHOLD = 0.35
 TEXT_THRESHOLD = 0.25
-VIDEO_PATH = "./assets/hippopotamus.mp4"
-TEXT_PROMPT = "hippopotamus."
-OUTPUT_VIDEO_PATH = "./hippopotamus_tracking_demo.mp4"
+VIDEO_PATH = "./assets/dish.mp4"
+# VIDEO_PATH = "./assets/color_20240826_132239_0217.jpg"
+TEXT_PROMPT = "dish. food. tray."
+OUTPUT_VIDEO_PATH = "./dish_tracking_demo.mp4"
+# OUTPUT_VIDEO_PATH = "./test.jpg"
 SOURCE_VIDEO_FRAME_DIR = "./custom_video_frames"
 SAVE_TRACKING_RESULTS_DIR = "./tracking_results"
 PROMPT_TYPE_FOR_VIDEO = "box" # choose from ["point", "box", "mask"]

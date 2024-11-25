@@ -3,10 +3,14 @@ import cv2
 import torch
 import numpy as np
 import supervision as sv
+from torchvision.ops import box_convert
+from pathlib import Path
+from tqdm import tqdm
 from PIL import Image
 from sam2.build_sam import build_sam2_video_predictor, build_sam2
 from sam2.sam2_image_predictor import SAM2ImagePredictor
-from transformers import AutoProcessor, AutoModelForZeroShotObjectDetection 
+# from transformers import AutoProcessor, AutoModelForZeroShotObjectDetection 
+from grounding_dino.groundingdino.util.inference import load_model, load_image, predict
 from utils.track_utils import sample_points_from_masks
 from utils.video_utils import create_video_from_images
 from utils.common_utils import CommonUtils
@@ -14,17 +18,45 @@ from utils.mask_dictionary_model import MaskDictionaryModel, ObjectInfo
 import json
 import copy
 
-# This demo shows the continuous object tracking plus reverse tracking with Grounding DINO and SAM 2
 """
-Step 1: Environment settings and model initialization
+Hyperparam for Ground and Tracking
 """
-# use bfloat16 for the entire notebook
-torch.autocast(device_type="cuda", dtype=torch.bfloat16).__enter__()
+GROUNDING_DINO_CONFIG = "grounding_dino/groundingdino/config/GroundingDINO_SwinT_OGC.py"
+# GROUNDING_DINO_CHECKPOINT = "gdino_checkpoints/groundingdino_swint_ogc.pth"
+GROUNDING_DINO_CHECKPOINT = "gdino_checkpoints/original_groundingdino_swint_ogc.pth"
+BOX_THRESHOLD = 0.35
+TEXT_THRESHOLD = 0.25
+VIDEO_PATH = "./assets/vlog.mp4"
+# VIDEO_PATH = "./assets/color_20240826_132239_0217.jpg"
+# TEXT_PROMPT = "dish. food. tray."
+TEXT_PROMPT = "dish. tray."
+OUTPUT_PATH = "outputs_tray_after"
+OUTPUT_VIDEO_PATH = "dish_tracking.mp4"
+# OUTPUT_VIDEO_PATH = "./test.jpg"
+SOURCE_VIDEO_FRAME_DIR = "./custom_video_frames"
+SAVE_TRACKING_RESULTS_DIR = "./tracking_results"
+PROMPT_TYPE_FOR_VIDEO = "box" # choose from ["point", "box", "mask"]
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+
+"""
+Step 1: Environment settings and model initialization for Grounding DINO and SAM 2
+"""
+# # use bfloat16 for the entire notebook
+# torch.autocast(device_type="cuda", dtype=torch.bfloat16).__enter__()
+# use float32 for the entire notebook
+torch.autocast(device_type="cuda", dtype=torch.float32).__enter__()
 
 if torch.cuda.get_device_properties(0).major >= 8:
     # turn on tfloat32 for Ampere GPUs (https://pytorch.org/docs/stable/notes/cuda.html#tensorfloat-32-tf32-on-ampere-devices)
     torch.backends.cuda.matmul.allow_tf32 = True
     torch.backends.cudnn.allow_tf32 = True
+
+# build grounding dino model from local path
+grounding_model = load_model(
+    model_config_path=GROUNDING_DINO_CONFIG, 
+    model_checkpoint_path=GROUNDING_DINO_CHECKPOINT,
+    device=DEVICE
+)
 
 # init sam image predictor and video predictor model
 sam2_checkpoint = "./checkpoints/sam2.1_hiera_large.pt"
@@ -36,39 +68,46 @@ video_predictor = build_sam2_video_predictor(model_cfg, sam2_checkpoint)
 sam2_image_model = build_sam2(model_cfg, sam2_checkpoint, device=device)
 image_predictor = SAM2ImagePredictor(sam2_image_model)
 
+"""
+Custom video input directly using video files
+"""
+video_info = sv.VideoInfo.from_video_path(VIDEO_PATH)  # get video info
+print(video_info)
+frame_generator = sv.get_video_frames_generator(VIDEO_PATH, stride=1, start=0, end=None)
 
-# init grounding dino model from huggingface
-model_id = "IDEA-Research/grounding-dino-tiny"
-processor = AutoProcessor.from_pretrained(model_id)
-grounding_model = AutoModelForZeroShotObjectDetection.from_pretrained(model_id).to(device)
+# saving video to frames
+source_frames = Path(SOURCE_VIDEO_FRAME_DIR)
+source_frames.mkdir(parents=True, exist_ok=True)
 
+with sv.ImageSink(
+    target_dir_path=source_frames, 
+    overwrite=True, 
+    image_name_pattern="{:05d}.jpg"
+) as sink:
+    for frame in tqdm(frame_generator, desc="Saving Video Frames"):
+        sink.save_image(frame)
 
-# setup the input image and text prompt for SAM 2 and Grounding DINO
-# VERY important: text queries need to be lowercased + end with a dot
-text = "dish. food. tray."
-# "car."
-
-# `video_dir` a directory of JPEG frames with filenames like `<frame_index>.jpg`  
-video_dir = "notebooks/videos/dish"
 # 'output_dir' is the directory to save the annotated frames
-output_dir = "outputs"
+output_dir = OUTPUT_PATH
 # 'output_video_path' is the path to save the final video
-output_video_path = "./outputs/output.mp4"
+# output_video_path = "./outputs/output.mp4"
+output_video_path = os.path.join(output_dir,OUTPUT_VIDEO_PATH)
 # create the output directory
 mask_data_dir = os.path.join(output_dir, "mask_data")
 json_data_dir = os.path.join(output_dir, "json_data")
 result_dir = os.path.join(output_dir, "result")
 CommonUtils.creat_dirs(mask_data_dir)
 CommonUtils.creat_dirs(json_data_dir)
+
 # scan all the JPEG frame names in this directory
 frame_names = [
-    p for p in os.listdir(video_dir)
+    p for p in os.listdir(SOURCE_VIDEO_FRAME_DIR)
     if os.path.splitext(p)[-1] in [".jpg", ".jpeg", ".JPG", ".JPEG", ".png", ".PNG"]
 ]
 frame_names.sort(key=lambda p: int(os.path.splitext(p)[0]))
 
 # init video predictor state
-inference_state = video_predictor.init_state(video_path=video_dir)
+inference_state = video_predictor.init_state(video_path=SOURCE_VIDEO_FRAME_DIR)
 step = 10 # the step to sample frames for Grounding DINO predictor
 
 sam2_masks = MaskDictionaryModel()
@@ -83,31 +122,49 @@ for start_frame_idx in range(0, len(frame_names), step):
 # prompt grounding dino to get the box coordinates on specific frame
     print("start_frame_idx", start_frame_idx)
     # continue
-    img_path = os.path.join(video_dir, frame_names[start_frame_idx])
-    image = Image.open(img_path).convert("RGB")
+    img_path = os.path.join(SOURCE_VIDEO_FRAME_DIR, frame_names[start_frame_idx])
+    # image = Image.open(img_path).convert("RGB")
+    image_source, image = load_image(img_path)
+
     image_base_name = frame_names[start_frame_idx].split(".")[0]
     mask_dict = MaskDictionaryModel(promote_type = PROMPT_TYPE_FOR_VIDEO, mask_name = f"mask_{image_base_name}.npy")
 
-    # run Grounding DINO on the image
-    inputs = processor(images=image, text=text, return_tensors="pt").to(device)
-    with torch.no_grad():
-        outputs = grounding_model(**inputs)
-
-    results = processor.post_process_grounded_object_detection(
-        outputs,
-        inputs.input_ids,
-        box_threshold=0.25,
-        text_threshold=0.25,
-        target_sizes=[image.size[::-1]]
+    boxes, confidences, labels = predict(
+        model=grounding_model,
+        image=image,
+        caption=TEXT_PROMPT,
+        box_threshold=BOX_THRESHOLD,
+        text_threshold=TEXT_THRESHOLD,
     )
 
-    # prompt SAM image predictor to get the mask for the object
-    image_predictor.set_image(np.array(image.convert("RGB")))
+    # process the box prompt for SAM 2
+    h, w, _ = image_source.shape
+    boxes = boxes * torch.Tensor([w, h, w, h])
+    if boxes.shape[0] == 0:
+        input_boxes = np.zeros((1, 4))
+        labels = ['']
+    else:
+        input_boxes = box_convert(boxes=boxes, in_fmt="cxcywh", out_fmt="xyxy").numpy()
+    confidences = confidences.numpy().tolist()
+    class_names = labels
+    print("input_boxes")
+    print(input_boxes)
 
-    # process the detection results
-    input_boxes = results[0]["boxes"] # .cpu().numpy()
-    # print("results[0]",results[0])
-    OBJECTS = results[0]["labels"]
+    # prompt SAM image predictor to get the mask for the object
+    image_predictor.set_image(image_source)
+
+    # prompt SAM image predictor to get the mask for the object
+    OBJECTS = class_names
+
+    print(OBJECTS)
+
+    # # FIXME: figure how does this influence the G-DINO model
+    # torch.autocast(device_type=DEVICE, dtype=torch.bfloat16).__enter__()
+
+    # if torch.cuda.get_device_properties(0).major >= 8:
+    #     # turn on tfloat32 for Ampere GPUs (https://pytorch.org/docs/stable/notes/cuda.html#tensorfloat-32-tf32-on-ampere-devices)
+    #     torch.backends.cuda.matmul.allow_tf32 = True
+    #     torch.backends.cudnn.allow_tf32 = True
 
     # prompt SAM 2 image predictor to get the mask for the object
     masks, scores, logits = image_predictor.predict(
@@ -117,11 +174,11 @@ for start_frame_idx in range(0, len(frame_names), step):
         multimask_output=False,
     )
     # convert the mask shape to (n, H, W)
-    if masks.ndim == 2:
-        masks = masks[None]
-        scores = scores[None]
-        logits = logits[None]
-    elif masks.ndim == 4:
+    # if masks.ndim == 2:
+    #     masks = masks[None]
+    #     scores = scores[None]
+    #     logits = logits[None]
+    if masks.ndim == 4:
         masks = masks.squeeze(1)
     """
     Step 3: Register each object's positive points to video predictor
@@ -188,7 +245,7 @@ for start_frame_idx in range(0, len(frame_names), step):
         frame_masks_info.to_json(json_data_path)
        
 
-CommonUtils.draw_masks_and_box_with_supervision(video_dir, mask_data_dir, json_data_dir, result_dir)
+CommonUtils.draw_masks_and_box_with_supervision(SOURCE_VIDEO_FRAME_DIR, mask_data_dir, json_data_dir, result_dir)
 
 print("try reverse tracking")
 start_object_id = 0
@@ -227,6 +284,8 @@ for frame_idx, current_object_count in frame_object_count.items():
             json_data.labels[out_obj_id] = object_info
             mask_array = np.where(mask_array != out_obj_id, mask_array, 0)
             mask_array[object_info.mask] = out_obj_id
+            # print("mask_array.shape",mask_array.shape)
+            # print("object_info.mask.shape",object_info.mask.shape)
         
         np.save(mask_data_path, mask_array)
         json_data.to_json(json_data_path)
@@ -238,6 +297,6 @@ for frame_idx, current_object_count in frame_object_count.items():
 """
 Step 6: Draw the results and save the video
 """
-CommonUtils.draw_masks_and_box_with_supervision(video_dir, mask_data_dir, json_data_dir, result_dir+"_reverse")
+CommonUtils.draw_masks_and_box_with_supervision(SOURCE_VIDEO_FRAME_DIR, mask_data_dir, json_data_dir, result_dir+"_reverse")
 
 create_video_from_images(result_dir, output_video_path, frame_rate=15)

@@ -26,29 +26,12 @@ def preprocess_caption(caption: str) -> str:
     return result + "."
 
 
-# def load_model(model_config_path: str, model_checkpoint_path: str, device: str = "cuda"):
-def load_model(model_config_path: str, model_checkpoint_path: str, device: str = "cuda",strict: bool =False):
+def load_model(model_config_path: str, model_checkpoint_path: str, device: str = "cuda"):
     args = SLConfig.fromfile(model_config_path)
     args.device = device
     model = build_model(args)
     checkpoint = torch.load(model_checkpoint_path, map_location="cpu")
-    state_dict = model.state_dict()
-    # for k in checkpoint.keys():
-    #     if not (k.replace("module.","") in state_dict):
-    #         print(k, k.replace("module.","") in state_dict)
-    # for k in state_dict.keys():
-    #     if not ('module.' + k in checkpoint):
-    #         print('module.'+k, 'module.'+k in checkpoint)
-        # k=k.replace("module.","")
-        
-    # model.load_state_dict(clean_state_dict(checkpoint["model"]), strict=False)
-    if "model" in checkpoint.keys():
-        model.load_state_dict(clean_state_dict(checkpoint["model"]), strict=strict)
-    elif "state_dict" in checkpoint.keys():
-        model.load_state_dict(clean_state_dict(checkpoint["state_dict"]), strict=strict)
-    else:
-        # The state dict is the checkpoint
-        model.load_state_dict(clean_state_dict(checkpoint), strict=strict)
+    model.load_state_dict(clean_state_dict(checkpoint["model"]), strict=False)
     model.eval()
     return model
 

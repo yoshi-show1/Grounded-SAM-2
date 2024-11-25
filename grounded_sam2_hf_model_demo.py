@@ -37,6 +37,8 @@ DEVICE = "cuda" if torch.cuda.is_available() and not args.force_cpu else "cpu"
 OUTPUT_DIR = Path(args.output_dir)
 DUMP_JSON_RESULTS = not args.no_dump_json
 
+os.environ['TORCH_CUDA_ARCH_LIST'] = '6.0;6.1;6.2'
+
 # create output directory
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
